@@ -32,6 +32,7 @@ class AvailableStatuses(Enum):
 class WorkingLocations(Enum):
     OFFICE = "officeLocation"
     HOME = "homeLocation"
+    HOME_OFFICE = "homeOffice"
     OTHER = "otherLocation"
 
 

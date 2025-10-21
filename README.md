@@ -92,7 +92,21 @@ docker logs -f zulip-watcher
 #### Stop the container:
 ```bash
 docker stop zulip-watcher
+```
+
+#### Remove the container:
+```bash
 docker rm zulip-watcher
+```
+
+Or stop and remove in one command:
+```bash
+docker stop zulip-watcher && docker rm zulip-watcher
+```
+
+Or force remove a running container:
+```bash
+docker rm -f zulip-watcher
 ```
 
 #### Restart after stopping:

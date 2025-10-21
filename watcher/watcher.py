@@ -93,7 +93,8 @@ class ZulipStatusController:
 
     def _get_location_status(self, location: Optional[str]) -> ZulipStatus:
         """Determine status based on working location."""
-        if location == WorkingLocations.HOME.value:
+        logger.info(f"Working location from calendar: {location}")
+        if location in [WorkingLocations.HOME.value, WorkingLocations.HOME_OFFICE.value]:
             return AvailableStatuses.WORKING_REMOTELY.value
         elif location == WorkingLocations.OFFICE.value:
             return AvailableStatuses.IN_OFFICE.value
