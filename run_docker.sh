@@ -1,7 +1,9 @@
+#!/bin/bash
 
 docker build -t zulip-status-watcher .
 
-docker run  -v /data:/data \
+docker run -d \
+  -v /data:/data \
   --name zulip-watcher \
-  --rm \
+  --restart unless-stopped \
   zulip-status-watcher

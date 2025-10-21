@@ -48,8 +48,10 @@ Simply run the provided script:
 
 This script will:
 1. Build the Docker image
-2. Run the container with `/data` mounted
-3. Automatically remove the container when stopped (`--rm` flag)
+2. Run the container in detached mode with `/data` mounted
+3. **Automatically restart the container on system reboot** (`--restart unless-stopped`)
+
+The container will now start automatically when your system boots!
 
 #### Manual Docker Commands:
 
