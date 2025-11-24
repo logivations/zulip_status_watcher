@@ -46,8 +46,11 @@ class ZulipStatusController:
     def check_status(self) -> ZulipStatus:
         """Check calendar and determine the appropriate Zulip status."""
         meeting = self.calendar_client.get_current_meeting()
+        logger.debug(f"Meeting: {meeting}")
         location = self.calendar_client.get_working_location()
+        logger.debug(f"Location: {location}")
         vacation = self.calendar_client.check_vacation()
+        logger.debug(f"Vacation: {vacation}")
 
         if vacation:
             return self._get_vacation_status(vacation)

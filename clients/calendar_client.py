@@ -50,14 +50,16 @@ class CalendarClient:
         return build("calendar", "v3", credentials=creds)
 
     def get_events_list(self, max_results: int = 10) -> List[Dict[str, Any]]:
-        """Fetch upcoming events from the primary calendar."""
-        now = datetime.now(timezone.utc).isoformat()
+        """Fetch today's events from the primary calendar."""
+        now = datetime.now(timezone.utc)
+        end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
         try:
             events_result = (
                 self.service.events()
                 .list(
                     calendarId="primary",
-                    timeMin=now,
+                    timeMin=now.isoformat(),
+                    timeMax=end_of_day.isoformat(),
                     maxResults=max_results,
                     singleEvents=True,
                     orderBy="startTime",
