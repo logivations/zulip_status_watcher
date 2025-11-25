@@ -52,9 +52,6 @@ class CalendarClient:
     def get_events_list(self, max_results: int = 10) -> List[Dict[str, Any]]:
         """Fetch today's events from the primary calendar."""
         now = datetime.now(timezone.utc)
-        print(f"{now=}")
-        end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-        print(f"{end_of_day=}")
         try:
             events_result = (
                 self.service.events()
@@ -86,7 +83,6 @@ class CalendarClient:
                 if start_time.date() == now.date():
                     filtered_events.append(event)
 
-            print(f"{filtered_events=}")
             return filtered_events
         except Exception as e:
             logger.error(f"Error fetching events: {e}")
