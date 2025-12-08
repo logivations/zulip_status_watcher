@@ -27,6 +27,7 @@ class AvailableStatuses(Enum):
         reaction_type="realm_emoji",
     )
     DAY_OFF = ZulipStatus(status_text="Day off", emoji_name="palm_tree")
+    SICK_LEAVE = ZulipStatus(status_text="Sick leave", emoji_name="face_with_thermometer")
 
 
 class WorkingLocations(Enum):
