@@ -224,14 +224,12 @@ class MultiUserStatusController:
         self.running = False
 
     def _get_beta_users(self) -> List[str]:
-        """Get list of users from the beta group, filtered for safety."""
+        """Get list of users from the beta group."""
         try:
             members = self.groups_client.get_group_members(BETA_GROUP_EMAIL)
-            # Safety filter: only users with 'plapp' in email for now
-            filtered = [m for m in members if "plapp" in m.lower()]
-            if filtered:
-                logger.info(f"Beta users (filtered): {filtered}")
-                return filtered
+            if members:
+                logger.info(f"Beta users: {members}")
+                return members
         except Exception as e:
             logger.warning(f"Could not fetch group members: {e}")
 
