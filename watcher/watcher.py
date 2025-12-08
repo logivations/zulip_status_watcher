@@ -164,11 +164,20 @@ class UserStatusController:
                 user_prefix = self._get_user_prefix(current_text)
                 if "|" in current_text:
                     # Need to update to remove the auto part
+                    # If no user prefix remains, also clear the emoji
+                    if user_prefix:
+                        emoji_name = current_status.emoji_name if current_status else ""
+                        emoji_code = current_status.emoji_code if current_status else ""
+                        reaction_type = current_status.reaction_type if current_status else "unicode_emoji"
+                    else:
+                        emoji_name = ""
+                        emoji_code = ""
+                        reaction_type = "unicode_emoji"
                     if self.zulip_client.update_user_status(ZulipStatus(
                         status_text=user_prefix,
-                        emoji_name=current_status.emoji_name if current_status else "",
-                        emoji_code=current_status.emoji_code if current_status else "",
-                        reaction_type=current_status.reaction_type if current_status else "unicode_emoji",
+                        emoji_name=emoji_name,
+                        emoji_code=emoji_code,
+                        reaction_type=reaction_type,
                     )):
                         logger.info(f"Status updated to: {user_prefix}")
                     else:
@@ -283,6 +292,20 @@ class MultiUserStatusController:
     def update_all_users(self) -> bool:
         """Update status for all beta users."""
         users = self._get_beta_users()
+        current_users = set(users)
+        cached_users = set(self.user_controllers.keys())
+
+        # Log new users joining
+        new_users = current_users - cached_users
+        for user in new_users:
+            logger.info(f"New user joined beta: {user}")
+
+        # Remove controllers for users who left the group
+        removed_users = cached_users - current_users
+        for user in removed_users:
+            logger.info(f"User left beta, removing controller: {user}")
+            del self.user_controllers[user]
+
         for user_email in users:
             try:
                 controller = self._ensure_user_controller(user_email)
