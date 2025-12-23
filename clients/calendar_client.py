@@ -61,22 +61,25 @@ class CalendarClient:
             )
             events = events_result.get("items", [])
 
-            # Manually filter events to only include today's events
+            # Manually filter events to only include events active today
             filtered_events = []
             for event in events:
                 start_str = event["start"].get("dateTime", event["start"].get("date"))
+                end_str = event["end"].get("dateTime", event["end"].get("date"))
 
-                # Parse the start time
+                # Parse the start and end times
                 if "T" in start_str:
-                    # DateTime event
+                    # DateTime event - check if currently active
                     start_time = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                    end_time = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                    if start_time <= now <= end_time:
+                        filtered_events.append(event)
                 else:
-                    # All-day event (date only)
-                    start_time = datetime.fromisoformat(start_str).replace(tzinfo=timezone.utc)
-
-                # Check if event starts today
-                if start_time.date() == now.date():
-                    filtered_events.append(event)
+                    # All-day event - check if today falls within the event range
+                    start_date = datetime.fromisoformat(start_str).date()
+                    end_date = datetime.fromisoformat(end_str).date()
+                    if start_date <= now.date() < end_date:
+                        filtered_events.append(event)
 
             return filtered_events
         except Exception as e:
