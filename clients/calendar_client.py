@@ -143,6 +143,9 @@ class CalendarClient:
     def get_working_location(self) -> tuple[Optional[str], Optional[str]]:
         """Fetch the working location from events (both whole-day and timed).
 
+        When multiple working location events overlap, prefers the most recently updated one.
+        Timed events take priority over whole-day events.
+
         Returns:
             Tuple of (location_type, end_time_str) where end_time_str is HH:MM for timed events or None for whole-day.
         """
@@ -150,29 +153,50 @@ class CalendarClient:
             events = self.get_events_list(max_results=10)
             current_time = datetime.now(timezone.utc)
 
+            # Collect all matching working location events
+            timed_matches = []  # List of (updated_timestamp, location_type, end_time_str)
+            allday_matches = []  # List of (updated_timestamp, location_type)
+
             for event in events:
                 if not event.get("workingLocationProperties"):
                     continue
 
+                wl_props = event.get('workingLocationProperties', {})
+                logger.debug(f"Working location event: {event.get('summary', 'No summary')} - type: {wl_props.get('type')} - updated: {event.get('updated')}")
                 start_str = event["start"].get("dateTime", event["start"].get("date"))
                 end_str = event["end"].get("dateTime", event["end"].get("date"))
+                updated_str = event.get("updated", "1970-01-01T00:00:00.000Z")
+                updated_time = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
 
                 if "T" in start_str:
                     # Timed working location event
                     start_time = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
                     end_time = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
                     if start_time <= current_time <= end_time:
-                        location_type = event["workingLocationProperties"].get("type", None)
+                        location_type = wl_props.get("type", None)
                         end_time_local = end_time.strftime("%H:%M")
-                        return (location_type, end_time_local)
+                        timed_matches.append((updated_time, location_type, end_time_local))
                 else:
                     # Whole-day working location event
                     start_date = datetime.fromisoformat(start_str).date()
                     end_date = datetime.fromisoformat(end_str).date()
                     today = current_time.date()
                     if start_date <= today < end_date:
-                        location_type = event["workingLocationProperties"].get("type", None)
-                        return (location_type, None)
+                        location_type = wl_props.get("type", None)
+                        allday_matches.append((updated_time, location_type))
+
+            # Timed events take priority, then pick most recently updated
+            if timed_matches:
+                timed_matches.sort(key=lambda x: x[0], reverse=True)  # Sort by updated time, newest first
+                if len(timed_matches) > 1:
+                    logger.warning(f"Multiple timed working location events found, using most recent: {timed_matches[0][1]}")
+                return (timed_matches[0][1], timed_matches[0][2])
+
+            if allday_matches:
+                allday_matches.sort(key=lambda x: x[0], reverse=True)  # Sort by updated time, newest first
+                if len(allday_matches) > 1:
+                    logger.warning(f"Multiple all-day working location events found, using most recent: {allday_matches[0][1]}")
+                return (allday_matches[0][1], None)
 
             return (None, None)
         except Exception as e:
