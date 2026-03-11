@@ -96,6 +96,9 @@ class CalendarClient:
                 # Skip working location events - they're not meetings
                 if event.get("workingLocationProperties"):
                     continue
+                # Skip out-of-office events - they're not meetings
+                if event.get("eventType") == "outOfOffice":
+                    continue
 
                 start_str = event["start"].get("dateTime", event["start"].get("date"))
                 end_str = event["end"].get("dateTime", event["end"].get("date"))
@@ -214,14 +217,21 @@ class CalendarClient:
 
             for event in events:
                 summary = event.get("summary", "").lower()
-                if not (
+                is_ooo_event_type = event.get("eventType") == "outOfOffice"
+
+                is_keyword_match = (
                     summary.startswith("vacation")
                     or summary.startswith("out of office")
                     or summary.startswith("day off")
                     or summary.startswith("workation")
                     or summary.startswith("sick")
-                ):
+                )
+
+                if not (is_keyword_match or is_ooo_event_type):
                     continue
+
+                # Google Calendar OOO event type always maps to "Out of office"
+                event_summary = "Out of office" if is_ooo_event_type else event.get("summary", "")
 
                 start_str = event["start"].get("dateTime", event["start"].get("date"))
                 end_str = event["end"].get("dateTime", event["end"].get("date"))
@@ -232,17 +242,17 @@ class CalendarClient:
                         start_time = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
                         end_time = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
                         if start_time <= current_time <= end_time:
-                            timed_match = event.get("summary", "")
+                            timed_match = event_summary
                 else:
                     # Whole-day event - return immediately (has priority)
                     start_date = datetime.fromisoformat(start_str).date()
                     end_date = datetime.fromisoformat(end_str).date()
                     if start_date <= today < end_date:
-                        logger.info(f"Whole-day vacation event found: {event.get('summary', '')}")
-                        return event.get("summary", "")
+                        logger.info(f"Whole-day vacation/OOO event found: {event_summary}")
+                        return event_summary
 
             if timed_match:
-                logger.info(f"Timed vacation event found: {timed_match}")
+                logger.info(f"Timed vacation/OOO event found: {timed_match}")
                 return timed_match
 
             return None

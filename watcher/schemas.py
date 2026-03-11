@@ -16,7 +16,7 @@ class ZulipStatus:
 
 class AvailableStatuses(Enum):
     IN_OFFICE = ZulipStatus(status_text="In office", emoji_name="office")
-    OUT_OF_OFFICE = ZulipStatus(status_text="Out of office", emoji_name="palm_tree")
+    OUT_OF_OFFICE = ZulipStatus(status_text="Out of office", emoji_name="door")
     WORKING_REMOTELY = ZulipStatus(status_text="Working remotely", emoji_name="house")
     MEETING = ZulipStatus(status_text="meet: {meet_name}", emoji_name="calendar")
     LUNCH_BREAK = ZulipStatus(status_text="On a lunch break", emoji_name="salad")
