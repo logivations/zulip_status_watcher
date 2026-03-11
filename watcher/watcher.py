@@ -192,7 +192,8 @@ class UserStatusController:
             final_status_text = self._build_status_text(user_prefix, new_status.status_text)
             logger.debug(f"current_text='{current_text}', user_prefix='{user_prefix}', new_auto='{new_status.status_text}', final='{final_status_text}'")
 
-            if current_text != final_status_text:
+            current_emoji = current_status.emoji_name if current_status else ""
+            if current_text != final_status_text or current_emoji != new_status.emoji_name:
                 status_to_update = ZulipStatus(
                     status_text=final_status_text,
                     emoji_name=new_status.emoji_name,
