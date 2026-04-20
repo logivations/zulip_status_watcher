@@ -34,6 +34,7 @@ GOOGLE_CREDS = config_parser.get("zulip_status_watcher", "google_creds")
 GOOGLE_TOKEN_FILE = config_parser.get("zulip_status_watcher", "google_token_file")
 BETA_GROUP_EMAIL = "zulip_status_beta@lvairo.com"
 ADMIN_EMAIL = "johannes.plapp@lvairo.com"
+APPLY_TO_ALL_USERS = True
 
 
 class UserStatusController:
@@ -225,18 +226,27 @@ class MultiUserStatusController:
         self.running = False
 
     def _get_beta_users(self) -> List[str]:
-        """Get list of users from the beta group."""
-        try:
-            members = self.groups_client.get_group_members(BETA_GROUP_EMAIL)
-            if members:
-                logger.info(f"Beta users: {members}")
-                return members
-        except Exception as e:
-            logger.warning(f"Could not fetch group members: {e}")
+        """Get list of users to manage: all workspace users or just the beta group."""
+        if APPLY_TO_ALL_USERS:
+            try:
+                users = self.groups_client.get_all_domain_users()
+                if users:
+                    logger.info(f"Applying to all {len(users)} workspace users")
+                    return users
+            except Exception as e:
+                logger.warning(f"Could not fetch all domain users: {e}")
+        else:
+            try:
+                members = self.groups_client.get_group_members(BETA_GROUP_EMAIL)
+                if members:
+                    logger.info(f"Beta users: {members}")
+                    return members
+            except Exception as e:
+                logger.warning(f"Could not fetch group members: {e}")
 
         # Fallback to hardcoded list
         fallback = [ZULIP_BOT_EMAIL]
-        logger.info(f"Using fallback beta users: {fallback}")
+        logger.info(f"Using fallback users: {fallback}")
         return fallback
 
     def _find_zulip_user(self, zulip_client: ZulipClient, google_email: str) -> Optional[dict]:

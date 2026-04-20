@@ -22,7 +22,8 @@ class GroupsClient:
         self.credentials_file = credentials_file
         self.admin_email = admin_email
         self.scopes = [
-            "https://www.googleapis.com/auth/admin.directory.group.member.readonly"
+            "https://www.googleapis.com/auth/admin.directory.group.member.readonly",
+            "https://www.googleapis.com/auth/admin.directory.user.readonly",
         ]
         self.service = self._authenticate()
 
@@ -66,4 +67,40 @@ class GroupsClient:
             return members
         except Exception as e:
             logger.error(f"Error fetching group members: {e}")
+            return []
+
+    def get_all_domain_users(self, domain: str = None, customer: str = "my_customer") -> List[str]:
+        """
+        Get all active user emails in the Google Workspace domain.
+
+        Args:
+            domain: Optional specific domain to query. If None, uses `customer`.
+            customer: Customer ID for multi-domain workspaces. Defaults to "my_customer".
+
+        Returns:
+            List of user email addresses (active, non-suspended only).
+        """
+        try:
+            users = []
+            list_kwargs = {"maxResults": 500, "orderBy": "email"}
+            if domain:
+                list_kwargs["domain"] = domain
+            else:
+                list_kwargs["customer"] = customer
+
+            request = self.service.users().list(**list_kwargs)
+            while request is not None:
+                response = request.execute()
+                for user in response.get("users", []):
+                    if user.get("suspended") or user.get("archived"):
+                        continue
+                    email = user.get("primaryEmail")
+                    if email:
+                        users.append(email)
+                request = self.service.users().list_next(request, response)
+
+            logger.info(f"Found {len(users)} active users in workspace")
+            return users
+        except Exception as e:
+            logger.error(f"Error fetching domain users: {e}")
             return []
