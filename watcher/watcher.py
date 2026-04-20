@@ -35,13 +35,20 @@ GOOGLE_TOKEN_FILE = config_parser.get("zulip_status_watcher", "google_token_file
 BETA_GROUP_EMAIL = "zulip_status_beta@lvairo.com"
 ADMIN_EMAIL = "johannes.plapp@lvairo.com"
 APPLY_TO_ALL_USERS = True
+STATUS_UPDATE_INTERVAL_SECONDS = 20
+USER_DISCOVERY_INTERVAL_SECONDS = 300
 
 
 class UserStatusController:
-    """Controller for a single user's status."""
+    """Controller for a single user's status.
 
-    def __init__(self, user_email: str, zulip_client: ZulipClient, google_creds: str):
+    Transient — built once per update cycle per user, then discarded so the
+    googleapiclient service objects don't accumulate in memory.
+    """
+
+    def __init__(self, user_email: str, zulip_client: ZulipClient, zulip_user: dict, google_creds: str):
         self.user_email = user_email
+        self.zulip_user = zulip_user
         self.calendar_client = CalendarClient(google_creds, subject=user_email)
         self.zulip_client = zulip_client
 
@@ -155,6 +162,8 @@ class UserStatusController:
 
     def update_status(self) -> bool:
         """Update the Zulip status based on calendar information."""
+        original_target = self.zulip_client.target_user
+        self.zulip_client.target_user = self.zulip_user
         try:
             new_status = self.check_status()
             current_status = self.zulip_client.get_user_status()
@@ -211,22 +220,27 @@ class UserStatusController:
         except Exception as e:
             logger.error(f"Error updating status: {e}")
             return False
+        finally:
+            self.zulip_client.target_user = original_target
 
 class MultiUserStatusController:
-    """Controller that manages status updates for multiple users."""
+    """Controller that manages status updates for multiple users.
+
+    Holds exactly one admin ZulipClient shared across all users (via
+    target_user swapping), and rebuilds UserStatusController / CalendarClient
+    objects per update cycle so they don't accumulate in memory.
+    """
 
     def __init__(self):
         self.groups_client = GroupsClient(GOOGLE_CREDS, ADMIN_EMAIL)
-        self.user_controllers: dict[str, UserStatusController] = {}
-        # Map of user emails to their Zulip API tokens
-        # Using same admin token for all users (admin can update any user's status)
-        self.user_tokens: dict[str, str] = {}
-        self.admin_token = ZULIP_BOT_API_TOKEN
-        self.admin_email = ZULIP_BOT_EMAIL
+        self.zulip_client = ZulipClient(ZULIP_SERVER_URL, ZULIP_BOT_EMAIL, ZULIP_BOT_API_TOKEN)
+        self.known_users: List[str] = []
+        self.zulip_user_cache: dict[str, dict] = {}
+        self.missing_zulip_users: set[str] = set()
         self.running = False
 
-    def _get_beta_users(self) -> List[str]:
-        """Get list of users to manage: all workspace users or just the beta group."""
+    def _fetch_user_list(self) -> List[str]:
+        """Fetch the current list of users to manage."""
         if APPLY_TO_ALL_USERS:
             try:
                 users = self.groups_client.get_all_domain_users()
@@ -244,83 +258,86 @@ class MultiUserStatusController:
             except Exception as e:
                 logger.warning(f"Could not fetch group members: {e}")
 
-        # Fallback to hardcoded list
         fallback = [ZULIP_BOT_EMAIL]
         logger.info(f"Using fallback users: {fallback}")
         return fallback
 
-    def _find_zulip_user(self, zulip_client: ZulipClient, google_email: str) -> Optional[dict]:
-        """Try to find Zulip user, trying alternative domains if needed."""
-        # Try original email first
-        user = zulip_client.get_user_by_email(google_email)
-        if user and self._is_user_active(zulip_client, user):
-            return user
+    def refresh_user_list(self) -> None:
+        """Re-fetch the user list and drop caches for users who left.
 
-        # Extract username part
+        Also clears the missing-user cache so that colleagues who were not yet
+        in Zulip at the last discovery pass get retried.
+        """
+        users = self._fetch_user_list()
+        current = set(users)
+        previous = set(self.known_users)
+
+        for email in current - previous:
+            logger.info(f"New user discovered: {email}")
+        for email in previous - current:
+            logger.info(f"User removed: {email}")
+            self.zulip_user_cache.pop(email, None)
+            self.missing_zulip_users.discard(email)
+
+        # Retry users previously not found — they may have a Zulip account now.
+        self.missing_zulip_users.clear()
+        self.known_users = users
+
+    def _find_zulip_user(self, google_email: str) -> Optional[dict]:
+        """Find the Zulip user for a Google email, with caching.
+
+        Positive hits are cached until the user leaves the workspace; negative
+        hits are cached until the next refresh_user_list() call.
+        """
+        cached = self.zulip_user_cache.get(google_email)
+        if cached is not None:
+            return cached
+        if google_email in self.missing_zulip_users:
+            return None
+
+        candidates = [google_email]
         username = google_email.split("@")[0]
+        for domain in ("pixel-robotics.eu", "logivations.com"):
+            alt = f"{username}@{domain}"
+            if alt != google_email:
+                candidates.append(alt)
 
-        # Try alternative domains
-        alternative_domains = ["pixel-robotics.eu", "logivations.com"]
-        for domain in alternative_domains:
-            alt_email = f"{username}@{domain}"
-            if alt_email == google_email:
-                continue
-            user = zulip_client.get_user_by_email(alt_email)
-            if user and self._is_user_active(zulip_client, user):
-                logger.info(f"Found Zulip user {alt_email} for Google user {google_email}")
+        for email in candidates:
+            user = self.zulip_client.get_user_by_email(email)
+            if user and self._is_user_active(user):
+                if email != google_email:
+                    logger.info(f"Found Zulip user {email} for Google user {google_email}")
+                self.zulip_user_cache[google_email] = user
                 return user
 
+        self.missing_zulip_users.add(google_email)
+        logger.info(f"No active Zulip user for {google_email}")
         return None
 
-    def _is_user_active(self, zulip_client: ZulipClient, user: dict) -> bool:
+    def _is_user_active(self, user: dict) -> bool:
         """Check if a Zulip user is active by trying to get their status."""
+        original_target = self.zulip_client.target_user
         try:
-            original_target = zulip_client.target_user
-            zulip_client.target_user = user
-            status = zulip_client.get_user_status()
-            zulip_client.target_user = original_target
+            self.zulip_client.target_user = user
+            status = self.zulip_client.get_user_status()
             return status is not None
-        except:
+        except Exception:
             return False
-
-    def _ensure_user_controller(self, user_email: str) -> Optional[UserStatusController]:
-        """Get or create a controller for a user."""
-        if user_email not in self.user_controllers:
-            # Use admin token to update user's status
-            zulip_client = ZulipClient(ZULIP_SERVER_URL, self.admin_email, self.admin_token)
-            zulip_user = self._find_zulip_user(zulip_client, user_email)
-            if not zulip_user:
-                logger.warning(f"Could not find active Zulip user for {user_email}, skipping")
-                return None
-            zulip_client.target_user = zulip_user
-            self.user_controllers[user_email] = UserStatusController(
-                user_email, zulip_client, GOOGLE_CREDS
-            )
-        return self.user_controllers[user_email]
+        finally:
+            self.zulip_client.target_user = original_target
 
     def update_all_users(self) -> bool:
-        """Update status for all beta users."""
-        users = self._get_beta_users()
-        current_users = set(users)
-        cached_users = set(self.user_controllers.keys())
-
-        # Log new users joining
-        new_users = current_users - cached_users
-        for user in new_users:
-            logger.info(f"New user joined beta: {user}")
-
-        # Remove controllers for users who left the group
-        removed_users = cached_users - current_users
-        for user in removed_users:
-            logger.info(f"User left beta, removing controller: {user}")
-            del self.user_controllers[user]
-
-        for user_email in users:
+        """Update status for all currently-known users."""
+        for user_email in self.known_users:
             try:
-                controller = self._ensure_user_controller(user_email)
-                if controller:
-                    logger.info(f"Updating status for {user_email}")
-                    controller.update_status()
+                zulip_user = self._find_zulip_user(user_email)
+                if not zulip_user:
+                    continue
+                logger.info(f"Updating status for {user_email}")
+                controller = UserStatusController(
+                    user_email, self.zulip_client, zulip_user, GOOGLE_CREDS
+                )
+                controller.update_status()
             except Exception as e:
                 logger.error(f"Error updating status for {user_email}: {e}")
         return True
@@ -339,10 +356,11 @@ class MultiUserStatusController:
 
         self.running = True
 
-        # Schedule the update_all_users method to run every minute
-        schedule.every(20).seconds.do(self.update_all_users)
+        schedule.every(STATUS_UPDATE_INTERVAL_SECONDS).seconds.do(self.update_all_users)
+        schedule.every(USER_DISCOVERY_INTERVAL_SECONDS).seconds.do(self.refresh_user_list)
 
-        # Run once immediately
+        # Discover users first, then run one update immediately.
+        self.refresh_user_list()
         self.update_all_users()
 
         # Start the scheduler in a separate thread

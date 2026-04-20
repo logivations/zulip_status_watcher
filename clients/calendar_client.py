@@ -42,7 +42,7 @@ class CalendarClient:
         if self.subject:
             creds = creds.with_subject(self.subject)
 
-        return build("calendar", "v3", credentials=creds)
+        return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
     def get_events_list(self, max_results: int = 10) -> List[Dict[str, Any]]:
         """Fetch today's events from the primary calendar."""
