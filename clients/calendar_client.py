@@ -96,8 +96,11 @@ class CalendarClient:
                 # Skip working location events - they're not meetings
                 if event.get("workingLocationProperties"):
                     continue
-                # Skip out-of-office events - they're not meetings
-                if event.get("eventType") == "outOfOffice":
+                # Only true calendar events count as meetings. Tasks,
+                # birthdays, focus time, out-of-office, working locations,
+                # and Gmail-derived events are all non-meeting eventTypes.
+                event_type = event.get("eventType")
+                if event_type and event_type != "default":
                     continue
 
                 start_str = event["start"].get("dateTime", event["start"].get("date"))
