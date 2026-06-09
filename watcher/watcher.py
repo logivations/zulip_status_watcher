@@ -12,6 +12,7 @@ from tools.utils import get_expanded_appconfig
 from watcher.schemas import (
     AvailableStatuses,
     Meeting,
+    Vacation,
     WorkingLocations,
     ZulipStatus,
 )
@@ -69,28 +70,44 @@ class UserStatusController:
 
         return self._get_location_status(location, location_end_time)
 
-    def _get_vacation_status(self, vacation: str) -> ZulipStatus:
-        """Determine status based on vacation event."""
-        vacation_lower = vacation.lower()
+    def _get_vacation_status(self, vacation: Vacation) -> ZulipStatus:
+        """Determine status based on vacation event.
 
-        if "vacation" in vacation_lower:
-            return AvailableStatuses.VACATION.value
-        elif "workation" in vacation_lower:
-            return AvailableStatuses.WORKATION.value
-        elif "day off" in vacation_lower:
-            return AvailableStatuses.DAY_OFF.value
-        elif "sick" in vacation_lower:
-            return AvailableStatuses.SICK_LEAVE.value
-        elif "out of office" in vacation_lower:
+        Appends a "back" hint (e.g. "On vacation (back Jun 16)" or
+        "Out of office (back 2pm MUC)") when the calendar gives one.
+        """
+        summary_lower = vacation.summary.lower()
+
+        if "vacation" in summary_lower:
+            template = AvailableStatuses.VACATION.value
+            base_text = template.status_text
+        elif "workation" in summary_lower:
+            template = AvailableStatuses.WORKATION.value
+            base_text = template.status_text
+        elif "day off" in summary_lower:
+            template = AvailableStatuses.DAY_OFF.value
+            base_text = template.status_text
+        elif "sick" in summary_lower:
+            template = AvailableStatuses.SICK_LEAVE.value
+            base_text = template.status_text
+        elif "out of office" in summary_lower:
+            # Preserve any custom OOO event title as the base text.
             template = AvailableStatuses.OUT_OF_OFFICE.value
-            return ZulipStatus(
-                status_text=vacation,
-                emoji_name=template.emoji_name,
-                emoji_code=template.emoji_code,
-                reaction_type=template.reaction_type,
-            )
+            base_text = vacation.summary
         else:
-            return AvailableStatuses.OUT_OF_OFFICE.value
+            template = AvailableStatuses.OUT_OF_OFFICE.value
+            base_text = template.status_text
+
+        status_text = base_text
+        if vacation.back_label:
+            status_text = f"{base_text} (back {vacation.back_label})"
+
+        return ZulipStatus(
+            status_text=status_text,
+            emoji_name=template.emoji_name,
+            emoji_code=template.emoji_code,
+            reaction_type=template.reaction_type,
+        )
 
     def _get_meeting_status(self, meeting: Meeting, location: Optional[str] = None, location_end_time: Optional[str] = None) -> ZulipStatus:
         """Determine status based on current meeting."""

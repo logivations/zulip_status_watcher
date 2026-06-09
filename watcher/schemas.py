@@ -44,3 +44,15 @@ class Meeting:
     end_time: datetime
     meeting_url: Optional[str] = None
     status: str = "accepted"
+
+
+@dataclass
+class Vacation:
+    """An active absence (vacation/workation/day off/sick/out-of-office).
+
+    back_label is a short, human-readable hint of when the person is
+    available again, e.g. "Jun 16" for a multi-day absence or "2pm MUC"
+    for a same-day one. None when it can't be determined.
+    """
+    summary: str
+    back_label: Optional[str] = None

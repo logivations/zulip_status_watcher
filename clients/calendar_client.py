@@ -2,8 +2,9 @@
 #  Logivations GmbH, Munich 2025
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -11,9 +12,38 @@ from google.oauth2.service_account import Credentials as ServiceAccountCredentia
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from watcher.schemas import Meeting
+from watcher.schemas import Meeting, Vacation
 
 logger = logging.getLogger(__name__)
+
+# IANA timezone -> short label shown in same-day absence statuses
+# (e.g. "back 2pm MUC"). Unknown zones fall back to their city name.
+TIMEZONE_LABELS = {
+    "Europe/Berlin": "MUC",
+    "Europe/Munich": "MUC",
+    "Europe/Kyiv": "UA",
+    "Europe/Kiev": "UA",
+}
+
+
+def _tz_label(tz_name: Optional[str]) -> str:
+    """Short location label for a timezone, e.g. 'Europe/Berlin' -> 'MUC'."""
+    if not tz_name:
+        return ""
+    if tz_name in TIMEZONE_LABELS:
+        return TIMEZONE_LABELS[tz_name]
+    return tz_name.split("/")[-1].replace("_", " ")
+
+
+def _format_clock(dt: datetime) -> str:
+    """Format a time as a compact 12-hour clock, e.g. '2pm' or '2:30pm'."""
+    fmt = "%-I:%M%p" if dt.minute else "%-I%p"
+    return dt.strftime(fmt).lower()
+
+
+def _format_back_date(d: date) -> str:
+    """Format a return date compactly, e.g. 'Jun 16'."""
+    return f"{d.strftime('%b')} {d.day}"
 
 
 class CalendarClient:
@@ -209,14 +239,19 @@ class CalendarClient:
             logger.error(f"Error fetching working location: {e}")
             return (None, None)
 
-    def check_vacation(self):
-        """Check for vacation/sick/day off events (both whole-day and timed). Whole-day has priority."""
+    def check_vacation(self) -> Optional[Vacation]:
+        """Check for vacation/sick/day off events (both whole-day and timed).
+
+        Whole-day has priority. Returns a Vacation carrying the event summary
+        and a short "back" label (the first day/time the person is available
+        again), or None when no absence is active.
+        """
         try:
             events = self.get_events_list(max_results=10)
             current_time = datetime.now(timezone.utc)
             today = current_time.date()
 
-            timed_match = None
+            timed_match = None  # Optional[Vacation]
 
             for event in events:
                 summary = event.get("summary", "").lower()
@@ -245,21 +280,57 @@ class CalendarClient:
                         start_time = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
                         end_time = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
                         if start_time <= current_time <= end_time:
-                            timed_match = event_summary
+                            back_label = self._timed_back_label(
+                                end_time, event["end"].get("timeZone"), current_time
+                            )
+                            timed_match = Vacation(summary=event_summary, back_label=back_label)
                 else:
-                    # Whole-day event - return immediately (has priority)
+                    # Whole-day event - return immediately (has priority).
                     start_date = datetime.fromisoformat(start_str).date()
                     end_date = datetime.fromisoformat(end_str).date()
                     if start_date <= today < end_date:
-                        logger.info(f"Whole-day vacation/OOO event found: {event_summary}")
-                        return event_summary
+                        # All-day end date is exclusive, so it is already the
+                        # first day back.
+                        back_label = _format_back_date(end_date)
+                        logger.info(
+                            f"Whole-day vacation/OOO event found: {event_summary} (back {back_label})"
+                        )
+                        return Vacation(summary=event_summary, back_label=back_label)
 
             if timed_match:
-                logger.info(f"Timed vacation/OOO event found: {timed_match}")
+                logger.info(
+                    f"Timed vacation/OOO event found: {timed_match.summary} (back {timed_match.back_label})"
+                )
                 return timed_match
 
             return None
         except Exception as e:
             logger.error(f"Error checking vacation: {e}")
             return None
+
+    @staticmethod
+    def _timed_back_label(end_time: datetime, tz_name: Optional[str], now: datetime) -> str:
+        """Build the "back" label for a timed absence.
+
+        Same-day return -> clock time with a timezone label (e.g. "2pm MUC");
+        a return on a later day -> a date (e.g. "Jun 16"). All times are shown
+        in the event's own timezone so a Munich doctor's appointment reads in
+        Munich time and a Ukrainian one in Kyiv time.
+        """
+        zone = None
+        if tz_name:
+            try:
+                zone = ZoneInfo(tz_name)
+            except Exception:
+                logger.warning(f"Unknown event timezone '{tz_name}', falling back to event offset")
+
+        # When the zone is unknown, the parsed datetime still carries the
+        # original UTC offset, so its wall-clock time stays correct.
+        end_local = end_time.astimezone(zone) if zone else end_time
+        now_local = now.astimezone(zone) if zone else now.astimezone()
+
+        if end_local.date() > now_local.date():
+            return _format_back_date(end_local.date())
+
+        return f"{_format_clock(end_local)} {_tz_label(tz_name)}".strip()
 
