@@ -36,7 +36,7 @@ GOOGLE_TOKEN_FILE = config_parser.get("zulip_status_watcher", "google_token_file
 BETA_GROUP_EMAIL = "zulip_status_beta@lvairo.com"
 ADMIN_EMAIL = "johannes.plapp@lvairo.com"
 APPLY_TO_ALL_USERS = True
-STATUS_UPDATE_INTERVAL_SECONDS = 20
+STATUS_UPDATE_INTERVAL_SECONDS = 60
 USER_DISCOVERY_INTERVAL_SECONDS = 300
 
 
