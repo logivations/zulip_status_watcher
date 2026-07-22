@@ -2,8 +2,8 @@
 #  Logivations GmbH, Munich 2025
 import logging
 import os
-from datetime import date, datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from google.auth.transport.requests import Request
@@ -44,6 +44,70 @@ def _format_clock(dt: datetime) -> str:
 def _format_back_date(d: date) -> str:
     """Format a return date compactly, e.g. 'Jun 16'."""
     return f"{d.strftime('%b')} {d.day}"
+
+
+# How far ahead to look for follow-up absence events when computing the
+# real return date of a running absence.
+ABSENCE_HORIZON_DAYS = 60
+
+
+def _is_absence_event(event: Dict[str, Any]) -> bool:
+    """Whether a calendar event marks the person as absent."""
+    if event.get("eventType") == "outOfOffice":
+        return True
+    summary = event.get("summary", "").lower()
+    return (
+        summary.startswith("vacation")
+        or summary.startswith("out of office")
+        or summary.startswith("day off")
+        or summary.startswith("workation")
+        or summary.startswith("sick")
+    )
+
+
+def _absence_day_interval(event: Dict[str, Any]) -> Optional[Tuple[date, date]]:
+    """Day-granular [first absent day, first free day) interval of an absence.
+
+    Only fully covered days count: a timed absence ending at 2pm does not
+    block its last day. Google's out-of-office events are timed events
+    running midnight to midnight in the event's own timezone, so they cover
+    their days fully. Returns None when no full day is covered.
+    """
+    start_str = event["start"].get("dateTime", event["start"].get("date"))
+    end_str = event["end"].get("dateTime", event["end"].get("date"))
+
+    if "T" not in start_str:
+        # All-day event; the end date is already exclusive.
+        return date.fromisoformat(start_str), date.fromisoformat(end_str)
+
+    start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+    end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+    first_day = start_dt.date() if start_dt.time() == time(0) else start_dt.date() + timedelta(days=1)
+    first_free = end_dt.date()
+    if first_free <= first_day:
+        return None
+    return first_day, first_free
+
+
+def _first_free_workday(first_free: date, intervals: List[Tuple[date, date]]) -> date:
+    """Walk forward from first_free until a working day with no absence.
+
+    People often add multi-day vacations as one event per day (and skip the
+    weekends), so the running event's end date alone understates the absence.
+    Weekends never count as the day someone is "back".
+    """
+    horizon = first_free + timedelta(days=ABSENCE_HORIZON_DAYS)
+    while first_free < horizon:
+        if first_free.weekday() >= 5:  # Saturday / Sunday
+            first_free += timedelta(days=1)
+            continue
+        covering_end = max(
+            (e for (s, e) in intervals if s <= first_free < e), default=None
+        )
+        if covering_end is None:
+            return first_free
+        first_free = covering_end
+    return first_free
 
 
 class CalendarClient:
@@ -239,35 +303,53 @@ class CalendarClient:
             logger.error(f"Error fetching working location: {e}")
             return (None, None)
 
+    def _fetch_absence_events(self) -> List[Dict[str, Any]]:
+        """Fetch absence events for the next ABSENCE_HORIZON_DAYS days.
+
+        Uses its own, longer window than get_events_list so that follow-up
+        absence events (e.g. vacation days added one per day) are visible
+        when computing the real return date.
+        """
+        now = datetime.now(timezone.utc)
+        time_max = now + timedelta(days=ABSENCE_HORIZON_DAYS)
+        events_result = (
+            self.service.events()
+            .list(
+                calendarId="primary",
+                timeMin=now.isoformat(),
+                timeMax=time_max.isoformat(),
+                maxResults=100,
+                singleEvents=True,
+                orderBy="startTime",
+            )
+            .execute()
+        )
+        return [e for e in events_result.get("items", []) if _is_absence_event(e)]
+
     def check_vacation(self) -> Optional[Vacation]:
         """Check for vacation/sick/day off events (both whole-day and timed).
 
         Whole-day has priority. Returns a Vacation carrying the event summary
         and a short "back" label (the first day/time the person is available
         again), or None when no absence is active.
+
+        The back label looks past the running event: adjacent absence events
+        and weekends are skipped, so a vacation entered as one event per day
+        still reports the first actual working day back.
         """
         try:
-            events = self.get_events_list(max_results=10)
+            events = self._fetch_absence_events()
             current_time = datetime.now(timezone.utc)
             today = current_time.date()
+
+            intervals = [
+                iv for iv in (_absence_day_interval(e) for e in events) if iv
+            ]
 
             timed_match = None  # Optional[Vacation]
 
             for event in events:
-                summary = event.get("summary", "").lower()
                 is_ooo_event_type = event.get("eventType") == "outOfOffice"
-
-                is_keyword_match = (
-                    summary.startswith("vacation")
-                    or summary.startswith("out of office")
-                    or summary.startswith("day off")
-                    or summary.startswith("workation")
-                    or summary.startswith("sick")
-                )
-
-                if not (is_keyword_match or is_ooo_event_type):
-                    continue
-
                 # Google Calendar OOO event type always maps to "Out of office"
                 event_summary = "Out of office" if is_ooo_event_type else event.get("summary", "")
 
@@ -281,7 +363,7 @@ class CalendarClient:
                         end_time = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
                         if start_time <= current_time <= end_time:
                             back_label = self._timed_back_label(
-                                end_time, event["end"].get("timeZone"), current_time
+                                end_time, event["end"].get("timeZone"), current_time, intervals
                             )
                             timed_match = Vacation(summary=event_summary, back_label=back_label)
                 else:
@@ -290,8 +372,10 @@ class CalendarClient:
                     end_date = datetime.fromisoformat(end_str).date()
                     if start_date <= today < end_date:
                         # All-day end date is exclusive, so it is already the
-                        # first day back.
-                        back_label = _format_back_date(end_date)
+                        # first day back — before skipping follow-up absences.
+                        back_label = _format_back_date(
+                            _first_free_workday(end_date, intervals)
+                        )
                         logger.info(
                             f"Whole-day vacation/OOO event found: {event_summary} (back {back_label})"
                         )
@@ -309,13 +393,19 @@ class CalendarClient:
             return None
 
     @staticmethod
-    def _timed_back_label(end_time: datetime, tz_name: Optional[str], now: datetime) -> str:
+    def _timed_back_label(
+        end_time: datetime,
+        tz_name: Optional[str],
+        now: datetime,
+        intervals: Optional[List[Tuple[date, date]]] = None,
+    ) -> str:
         """Build the "back" label for a timed absence.
 
         Same-day return -> clock time with a timezone label (e.g. "2pm MUC");
-        a return on a later day -> a date (e.g. "Jun 16"). All times are shown
-        in the event's own timezone so a Munich doctor's appointment reads in
-        Munich time and a Ukrainian one in Kyiv time.
+        a return on a later day -> a date (e.g. "Jun 16"), pushed past any
+        follow-up absence events and weekends. All times are shown in the
+        event's own timezone so a Munich doctor's appointment reads in Munich
+        time and a Ukrainian one in Kyiv time.
         """
         zone = None
         if tz_name:
@@ -330,7 +420,9 @@ class CalendarClient:
         now_local = now.astimezone(zone) if zone else now.astimezone()
 
         if end_local.date() > now_local.date():
-            return _format_back_date(end_local.date())
+            return _format_back_date(
+                _first_free_workday(end_local.date(), intervals or [])
+            )
 
         return f"{_format_clock(end_local)} {_tz_label(tz_name)}".strip()
 
