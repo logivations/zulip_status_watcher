@@ -141,6 +141,44 @@ The watcher runs every minute and:
 2. Current Meeting
 3. Lunch Break
 4. Working Location (Office/Remote)
+5. W2MO check-in state (optional) → appends "| Available ✅" when checked in, "Unavailable" when checked out
+
+## W2MO Presence (optional)
+
+When `enable_w2mo_presence = true`, the watcher uses each user's W2MO workday
+check-in/out state as the **lowest-priority** signal. It applies when no
+calendar event produced a status, and it also **overrides a whole-day working
+location** — whole-day locations are usually the Google Workspace default
+("In office" every workday), not a deliberate signal, so actual W2MO presence
+wins over them. Deliberately set **timed** working locations (e.g. "Home
+9:00–13:00"), meetings, lunch and vacations always keep precedence. The user's
+custom prefix (text before `|`) is preserved as with every other auto status.
+
+- **Checked in** → "| Available ✅" is appended to the location status, which
+  otherwise stays as-is (e.g. `In office | Available ✅` 🏢 or
+  `Working remotely | Available ✅` 🏠). The W2MO check-in location replaces a
+  whole-day calendar default; a deliberately set timed location is kept.
+- **Checked out** → `Unavailable`, but only during Lviv core hours
+  (`w2mo_core_hours_start`–`w2mo_core_hours_end`, Mon–Fri). Outside that window
+  the auto status is simply cleared to avoid evening/weekend noise.
+- **Unknown / no record / no W2MO account** → no signal (auto status cleared).
+
+Configure in `zulip.properties`:
+
+```properties
+enable_w2mo_presence = true
+w2mo_server_url = https://your-w2mo-server.com
+w2mo_auth_token = <long-lived W2MO service JWT>
+w2mo_warehouse_id = <warehouse id>
+w2mo_core_hours_start = 10
+w2mo_core_hours_end = 16
+```
+
+The watcher reads presence via `GET /api/workday/currentWorkDayRecordedByEmail`,
+which returns any authenticated user's workday record, so a single service token
+suffices for the whole team. Google workspace emails (`@lvairo.com`) are mapped
+to W2MO accounts by retrying the same local part on `@logivations.com` /
+`@pixel-robotics.eu`; resolved mappings are cached.
 
 ## Troubleshooting
 

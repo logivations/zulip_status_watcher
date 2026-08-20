@@ -4,7 +4,9 @@ import configparser
 import logging
 import threading
 import time
+from datetime import datetime
 from typing import List, Optional
+from zoneinfo import ZoneInfo
 
 import schedule
 
@@ -13,10 +15,12 @@ from watcher.schemas import (
     AvailableStatuses,
     Meeting,
     Vacation,
+    W2moPresence,
     WorkingLocations,
     ZulipStatus,
 )
 from clients.calendar_client import CalendarClient
+from clients.w2mo_client import W2moClient
 from clients.zulip_client import ZulipClient
 from clients.groups_client import GroupsClient
 from tools.utils import setup_logging
@@ -39,6 +43,17 @@ APPLY_TO_ALL_USERS = True
 STATUS_UPDATE_INTERVAL_SECONDS = 60
 USER_DISCOVERY_INTERVAL_SECONDS = 300
 
+# W2MO presence integration (optional, lowest-priority signal).
+ENABLE_W2MO_PRESENCE = config_parser.getboolean(
+    "zulip_status_watcher", "enable_w2mo_presence", fallback=False
+)
+W2MO_SERVER_URL = config_parser.get("zulip_status_watcher", "w2mo_server_url", fallback="")
+W2MO_AUTH_TOKEN = config_parser.get("zulip_status_watcher", "w2mo_auth_token", fallback="")
+W2MO_WAREHOUSE_ID = config_parser.getint("zulip_status_watcher", "w2mo_warehouse_id", fallback=0)
+# Lviv core hours (local time)
+W2MO_CORE_HOURS_START = config_parser.getint("zulip_status_watcher", "w2mo_core_hours_start", fallback=10)
+W2MO_CORE_HOURS_END = config_parser.getint("zulip_status_watcher", "w2mo_core_hours_end", fallback=16)
+
 
 class UserStatusController:
     """Controller for a single user's status.
@@ -47,14 +62,16 @@ class UserStatusController:
     googleapiclient service objects don't accumulate in memory.
     """
 
-    def __init__(self, user_email: str, zulip_client: ZulipClient, zulip_user: dict, google_creds: str):
+    def __init__(self, user_email: str, zulip_client: ZulipClient, zulip_user: dict, google_creds: str,
+                 w2mo_client: Optional[W2moClient] = None):
         self.user_email = user_email
         self.zulip_user = zulip_user
         self.calendar_client = CalendarClient(google_creds, subject=user_email)
         self.zulip_client = zulip_client
+        self.w2mo_client = w2mo_client
 
     def check_status(self) -> Optional[ZulipStatus]:
-        """Check calendar and determine the appropriate Zulip status."""
+        """Check calendar (and, as a fallback, W2MO) and determine the Zulip status."""
         meeting = self.calendar_client.get_current_meeting()
         logger.debug(f"Meeting: {meeting}")
         location, location_end_time = self.calendar_client.get_working_location()
@@ -66,9 +83,68 @@ class UserStatusController:
             return self._get_vacation_status(vacation)
 
         if meeting:
-            return self._get_meeting_status(meeting, location, location_end_time)
+            status = self._get_meeting_status(meeting)
+            if status is not None:
+                return status
 
-        return self._get_location_status(location, location_end_time)
+        location_status = self._get_location_status(location, location_end_time)
+        # A whole-day working location (no end time) is usually the calendar
+        # default, not a deliberate signal.
+        is_default_location = location_status is not None and location_end_time is None
+        return self._apply_w2mo_presence(location_status, is_default_location)
+
+    def _apply_w2mo_presence(self, location_status: Optional[ZulipStatus], is_default_location: bool) -> Optional[ZulipStatus]:
+        """Refine the location status with the W2MO check-in state.
+
+        Checked in appends "| Available" to the location status (the W2MO
+        work location replaces a whole-day calendar default first). Checked out
+        during core hours replaces a default/absent location with "Unavailable";
+        a deliberately set timed location always stays untouched by check-out.
+        """
+        presence, w2mo_location = self._get_w2mo_presence()
+
+        if presence is W2moPresence.CHECKED_IN:
+            base = location_status
+            if base is None or is_default_location:
+                if w2mo_location is not None and w2mo_location.is_office:
+                    base = AvailableStatuses.IN_OFFICE.value
+                elif w2mo_location is not None and w2mo_location.is_remote:
+                    base = AvailableStatuses.WORKING_REMOTELY.value
+            if base is None:
+                return AvailableStatuses.AVAILABLE.value
+            return ZulipStatus(
+                status_text=f"{base.status_text} | Available ✅",
+                emoji_name=base.emoji_name,
+                emoji_code=base.emoji_code,
+                reaction_type=base.reaction_type,
+            )
+
+        if (presence is W2moPresence.CHECKED_OUT
+                and (location_status is None or is_default_location)
+                and self._within_core_hours()):
+            return AvailableStatuses.UNAVAILABLE.value
+
+        return location_status
+
+    def _get_w2mo_presence(self):
+        """Fetch (presence, work_location) from W2MO; (None, None) when unavailable."""
+        if self.w2mo_client is None:
+            return None, None
+        try:
+            presence, work_location = self.w2mo_client.get_presence(self.user_email)
+        except Exception as e:
+            logger.error(f"Failed to fetch W2MO presence for {self.user_email}: {e}")
+            return None, None
+        logger.debug(f"W2MO presence for {self.user_email}: {presence}, location: {work_location}")
+        return presence, work_location
+
+    @staticmethod
+    def _within_core_hours() -> bool:
+        """True during Lviv core hours (Mon-Fri, configurable window)."""
+        now = datetime.now(ZoneInfo("Europe/Kyiv"))
+        if now.weekday() >= 5:  # Saturday/Sunday
+            return False
+        return W2MO_CORE_HOURS_START <= now.hour < W2MO_CORE_HOURS_END
 
     def _get_vacation_status(self, vacation: Vacation) -> ZulipStatus:
         """Determine status based on vacation event.
@@ -109,8 +185,8 @@ class UserStatusController:
             reaction_type=template.reaction_type,
         )
 
-    def _get_meeting_status(self, meeting: Meeting, location: Optional[str] = None, location_end_time: Optional[str] = None) -> ZulipStatus:
-        """Determine status based on current meeting."""
+    def _get_meeting_status(self, meeting: Meeting) -> Optional[ZulipStatus]:
+        """Determine status based on current meeting; None if the meeting was declined."""
         if "lunch" in meeting.title.lower():
             return AvailableStatuses.LUNCH_BREAK.value
 
@@ -118,7 +194,7 @@ class UserStatusController:
             logger.info(
                 f"Meeting found but status is {meeting.status}, not updating status."
             )
-            return self._get_location_status(location, location_end_time)
+            return None
 
         template = AvailableStatuses.MEETING.value
         return ZulipStatus(
@@ -251,6 +327,11 @@ class MultiUserStatusController:
     def __init__(self):
         self.groups_client = GroupsClient(GOOGLE_CREDS, ADMIN_EMAIL)
         self.zulip_client = ZulipClient(ZULIP_SERVER_URL, ZULIP_BOT_EMAIL, ZULIP_BOT_API_TOKEN)
+        self.w2mo_client = (
+            W2moClient(W2MO_SERVER_URL, W2MO_WAREHOUSE_ID, W2MO_AUTH_TOKEN)
+            if ENABLE_W2MO_PRESENCE
+            else None
+        )
         self.known_users: List[str] = []
         self.zulip_user_cache: dict[str, dict] = {}
         self.missing_zulip_users: set[str] = set()
@@ -298,6 +379,8 @@ class MultiUserStatusController:
 
         # Retry users previously not found — they may have a Zulip account now.
         self.missing_zulip_users.clear()
+        if self.w2mo_client is not None:
+            self.w2mo_client.clear_missing_users()
         self.known_users = users
 
     def _find_zulip_user(self, google_email: str) -> Optional[dict]:
@@ -352,7 +435,7 @@ class MultiUserStatusController:
                     continue
                 logger.info(f"Updating status for {user_email}")
                 controller = UserStatusController(
-                    user_email, self.zulip_client, zulip_user, GOOGLE_CREDS
+                    user_email, self.zulip_client, zulip_user, GOOGLE_CREDS, self.w2mo_client
                 )
                 controller.update_status()
             except Exception as e:

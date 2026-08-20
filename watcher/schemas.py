@@ -28,6 +28,42 @@ class AvailableStatuses(Enum):
     )
     DAY_OFF = ZulipStatus(status_text="Day off", emoji_name="palm_tree")
     SICK_LEAVE = ZulipStatus(status_text="Sick leave", emoji_name="face_with_thermometer")
+    # W2MO check-in derived statuses
+    AVAILABLE = ZulipStatus(status_text="Available", emoji_name="check")
+    UNAVAILABLE = ZulipStatus(status_text="Unavailable", emoji_name="red_circle")
+
+
+class W2moPresence(Enum):
+    CHECKED_IN = "checked_in"
+    CHECKED_OUT = "checked_out"
+    UNKNOWN = "unknown"
+
+
+class W2moWorkLocation(Enum):
+    """Mirrors the W2MO 'work-location' enum ordinals stored on lv_workday_recorded."""
+
+    MUC_OFFICE = 0
+    LVIV_OFFICE = 1
+    HOME = 2
+    CUSTOMER = 3
+    OTHERS = 4
+
+    @classmethod
+    def from_code(cls, code: Optional[int]) -> Optional["W2moWorkLocation"]:
+        if code is None:
+            return None
+        try:
+            return cls(code)
+        except ValueError:
+            return None
+
+    @property
+    def is_office(self) -> bool:
+        return self in (W2moWorkLocation.MUC_OFFICE, W2moWorkLocation.LVIV_OFFICE)
+
+    @property
+    def is_remote(self) -> bool:
+        return self is W2moWorkLocation.HOME
 
 
 class WorkingLocations(Enum):
